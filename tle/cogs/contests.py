@@ -138,6 +138,7 @@ class Contests(commands.Cog):
     async def on_ready(self):
         self._update_task.start()
         self._watch_rated_vcs_task.start()
+        self._watch_rating_changes_task.start()
 
     @tasks.task_spec(
         name='ContestCogUpdate',
@@ -976,6 +977,156 @@ class Contests(commands.Cog):
         discord_common.attach_image(embed, discord_file)
         discord_common.set_author_footer(embed, ctx.author)
         await ctx.send(embed=embed, file=discord_file)
+
+    @staticmethod
+    def _make_cf_rating_changes_embed(guild, contest_id, rating_changes):
+        """Make an embed containing rating changes for a Codeforces contest."""
+        contest = cf_common.cache2.contest_cache.get_contest(contest_id)
+        user_id_handle_pairs = cf_common.user_db.get_handles_for_guild(guild.id)
+        guild_handles = {handle.lower() for _, handle in user_id_handle_pairs}
+        
+        # Filter rating changes to only include server members
+        member_changes = [
+            change for change in rating_changes 
+            if change.handle.lower() in guild_handles
+        ]
+        
+        if not member_changes:
+            embed = discord_common.cf_color_embed(title=contest.name, url=contest.url)
+            embed.set_author(name='Rating Updates')
+            embed.description = 'No rating changes found for server members'
+            return embed
+        
+        rank_to_role = {role.name: role for role in guild.roles}
+
+        def rating_to_displayable_rank(rating):
+            rank = cf.rating2rank(rating).title
+            role = rank_to_role.get(rank)
+            return role.mention if role else rank
+
+        # Rank changes (promotions/demotions)
+        rank_changes_str = []
+        for change in member_changes:
+            old_role = rating_to_displayable_rank(change.oldRating)
+            new_role = rating_to_displayable_rank(change.newRating)
+            if new_role != old_role:
+                rank_change_str = f'[{discord.utils.escape_markdown(change.handle)}]({cf.PROFILE_BASE_URL}{change.handle}): {old_role} \N{LONG RIGHTWARDS ARROW} {new_role}'
+                rank_changes_str.append(rank_change_str)
+
+        # Sort by rating delta for top increases
+        member_changes_sorted = sorted(member_changes, 
+                                     key=lambda x: x.newRating - x.oldRating, 
+                                     reverse=True)
+        
+        # Top rating increases (show top 10)
+        rating_increases_str = []
+        for change in member_changes_sorted[:10]:
+            delta = change.newRating - change.oldRating
+            if delta > 0:  # Only show increases
+                rating_change_str = f'[{discord.utils.escape_markdown(change.handle)}]({cf.PROFILE_BASE_URL}{change.handle}): {change.oldRating} \N{HORIZONTAL BAR} **+{delta}** \N{LONG RIGHTWARDS ARROW} {change.newRating}'
+                rating_increases_str.append(rating_change_str)
+
+        desc = '\n'.join(rank_changes_str[:10]) or 'No rank changes'  # Limit to 10
+        embed = discord_common.cf_color_embed(
+            title=contest.name, url=contest.url, description=desc
+        )
+        embed.set_author(name='Rating Updates')
+        
+        if rating_increases_str:
+            embed.add_field(
+                name='Top rating increases',
+                value='\n'.join(rating_increases_str),
+                inline=False,
+            )
+        
+        return embed
+
+    @commands.command(brief='Show rating changes for server members after a contest')
+    async def ratingchanges(self, ctx, contest_id: int):
+        """
+        Shows rating changes for server members after a Codeforces contest.
+        Displays rank promotions/demotions and top rating increases.
+        """
+        try:
+            contest = cf_common.cache2.contest_cache.get_contest(contest_id)
+        except cache_system2.ContestNotFound:
+            raise ContestCogError(f'Contest with ID `{contest_id}` not found')
+        
+        if contest.phase == 'BEFORE':
+            raise ContestCogError(f'Contest `{contest.name}` has not started yet')
+        
+        try:
+            rating_changes = await cf.contest.ratingChanges(contest_id=contest_id)
+        except cf.RatingChangesUnavailableError:
+            raise ContestCogError(f'Rating changes are not yet available for contest `{contest.name}`')
+        
+        if not rating_changes:
+            raise ContestCogError(f'No rating changes found for contest `{contest.name}`')
+        
+        embed = self._make_cf_rating_changes_embed(ctx.guild, contest_id, rating_changes)
+        await ctx.send(embed=embed)
+
+    @tasks.task_spec(
+        name='WatchRatingChanges',
+        waiter=tasks.Waiter.for_event(events.RatingChangesUpdate),
+    )
+    async def _watch_rating_changes_task(self, event):
+        """Automatically post rating changes when they become available."""
+        contest = event.contest
+        rating_changes = event.rating_changes
+        
+        for guild in self.bot.guilds:
+            try:
+                settings = cf_common.user_db.get_rating_changes_channel(guild.id)
+                if settings is None:
+                    continue
+                    
+                channel_id = int(settings)
+                channel = guild.get_channel(channel_id)
+                if channel is None:
+                    continue
+                    
+                embed = self._make_cf_rating_changes_embed(guild, contest.id, rating_changes)
+                # Only send if there are actual changes for server members
+                if embed.description != 'No rating changes found for server members':
+                    await channel.send(embed=embed)
+                    
+            except Exception as e:
+                self.logger.error(f'Error posting rating changes for guild {guild.id}: {e}')
+
+    @commands.command(brief='Set rating changes channel to the current channel')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def set_rating_changes_channel(self, ctx):
+        """Sets the rating changes channel to the current channel."""
+        cf_common.user_db.set_rating_changes_channel(ctx.guild.id, ctx.channel.id)
+        await ctx.send(
+            embed=discord_common.embed_success('Rating changes channel saved successfully')
+        )
+
+    @commands.command(brief='Clear rating changes channel')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def clear_rating_changes_channel(self, ctx):
+        """Clears the rating changes channel setting."""
+        cf_common.user_db.clear_rating_changes_channel(ctx.guild.id)
+        await ctx.send(
+            embed=discord_common.embed_success('Rating changes channel cleared')
+        )
+
+    @commands.command(brief='Get the rating changes channel')
+    async def get_rating_changes_channel(self, ctx):
+        """Gets the rating changes channel."""
+        settings = cf_common.user_db.get_rating_changes_channel(ctx.guild.id)
+        if settings is None:
+            raise ContestCogError('There is no rating changes channel set')
+            
+        channel_id = int(settings)
+        channel = ctx.guild.get_channel(channel_id)
+        if channel is None:
+            raise ContestCogError('The rating changes channel is no longer available')
+            
+        embed = discord_common.embed_success('Current rating changes channel')
+        embed.add_field(name='Channel', value=channel.mention)
+        await ctx.send(embed=embed)
 
     @discord_common.send_error_if(
         ContestCogError,

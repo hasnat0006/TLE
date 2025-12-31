@@ -207,6 +207,13 @@ class UserDbConn:
         """)
 
         self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS rating_changes_settings (
+                guild_id TEXT PRIMARY KEY,
+                channel_id TEXT
+            )
+        """)
+
+        self.conn.execute("""
             CREATE TABLE IF NOT EXISTS starboard_config_v1 (
                 guild_id TEXT,
                 emoji TEXT,
@@ -1152,6 +1159,24 @@ class UserDbConn:
         query = 'SELECT channel_id FROM rated_vc_settings WHERE guild_id = ?'
         channel_id = self.conn.execute(query, (guild_id,)).fetchone()
         return int(channel_id[0]) if channel_id else None
+
+    def set_rating_changes_channel(self, guild_id, channel_id):
+        query = """
+            INSERT OR REPLACE INTO rating_changes_settings (guild_id, channel_id)
+            VALUES (?, ?)
+        """
+        with self.conn:
+            self.conn.execute(query, (guild_id, channel_id))
+
+    def get_rating_changes_channel(self, guild_id):
+        query = 'SELECT channel_id FROM rating_changes_settings WHERE guild_id = ?'
+        channel_id = self.conn.execute(query, (guild_id,)).fetchone()
+        return channel_id[0] if channel_id else None
+
+    def clear_rating_changes_channel(self, guild_id):
+        query = 'DELETE FROM rating_changes_settings WHERE guild_id = ?'
+        with self.conn:
+            self.conn.execute(query, (guild_id,))
 
     def remove_last_ratedvc_participation(self, user_id: str):
         query = 'SELECT MAX(vc_id) AS vc_id FROM rated_vc_users WHERE user_id = ? '
