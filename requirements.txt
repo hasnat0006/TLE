@@ -12,6 +12,7 @@ matplotlib
 seaborn
 cycler
 pycairo
+PyGObject
 PyNaCl
 
 # Image processing
