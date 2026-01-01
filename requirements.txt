@@ -1,0 +1,22 @@
+# Discord bot core
+discord.py==1.7.3
+aiohttp<3.8
+aiocache
+
+# Data processing and analysis
+numpy
+pandas
+
+# Plotting and visualization
+matplotlib
+seaborn
+cycler
+
+# Image processing
+pillow
+
+# Web scraping and parsing
+lxml
+
+# Development and testing (optional)
+pytest
