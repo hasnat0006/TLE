@@ -11,6 +11,7 @@ pandas
 matplotlib
 seaborn
 cycler
+pycairo
 
 # Image processing
 pillow

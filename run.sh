@@ -1,125 +1,172 @@
 #!/bin/bash
 
-# TLE Bot Complete Setup and Run Script
-# This script handles everything: dependencies, setup, and running the bot
+# TLE Bot Comprehensive Setup and Run Script
+set -e
 
-set -e  # Exit on any error
+# Function to check Python version compatibility
+check_python_version() {
+    python3 -c "
+import sys
+version = sys.version_info
+if version < (3, 9):
+    print('❌ Python 3.9+ required. Current:', f'{version.major}.{version.minor}.{version.micro}')
+    sys.exit(1)
+elif version >= (3, 13):
+    print('❌ Python 3.13+ has compatibility issues with discord.py dependencies.')
+    print('   The cgi module was removed in Python 3.13, breaking aiohttp.')
+    print(f'   Current: {version.major}.{version.minor}.{version.micro}')
+    print('   ✅ Recommended: Python 3.9-3.12')
+    sys.exit(1)
+else:
+    print(f'✅ Python version {version.major}.{version.minor}.{version.micro} is compatible')
+"
+}
 
-echo "🚀 TLE Bot - One Command Setup & Run"
-echo "========================================"
-
-# Function to check if system dependencies are installed
-check_system_deps() {
-    echo "🔍 Checking system dependencies..."
-    
-    # Check for required packages
-    local missing_deps=()
-    
-    if ! dpkg -l | grep -q "libcairo2-dev"; then missing_deps+=("libcairo2-dev"); fi
-    if ! dpkg -l | grep -q "python3-gi"; then missing_deps+=("python3-gi"); fi
-    if ! dpkg -l | grep -q "python3-venv"; then missing_deps+=("python3-venv"); fi
-    
-    if [ ${#missing_deps[@]} -gt 0 ]; then
-        echo "📦 Installing missing system dependencies..."
-        sudo apt-get update
-        sudo apt-get install -y \
-            libcairo2-dev \
-            libgirepository1.0-dev \
-            python3-gi \
-            python3-gi-cairo \
-            python3-cairo \
-            libjpeg-dev \
-            zlib1g-dev \
-            pkg-config \
-            python3 \
-            python3-pip \
-            python3-venv
-        echo "✅ System dependencies installed!"
+# Function to install system dependencies (Linux only)
+install_system_deps() {
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        echo "🎨 Installing system graphics libraries..."
+        
+        # Check if running in a container/cloud environment
+        if [ -f /.dockerenv ] || [ -n "$RENDER" ] || [ -n "$HEROKU" ]; then
+            echo "📦 Cloud environment detected, skipping system package installation"
+            echo "   Make sure your platform has cairo, pango, and graphics libraries installed"
+            return 0
+        fi
+        
+        # Try to install system dependencies
+        if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update || echo "⚠️  Could not update package list"
+            sudo apt-get install -y \
+                libcairo2-dev \
+                libgirepository1.0-dev \
+                python3-gi \
+                python3-gi-cairo \
+                python3-cairo \
+                libjpeg-dev \
+                zlib1g-dev \
+                pkg-config \
+                python3-venv || echo "⚠️  Some system packages may not have been installed"
+        else
+            echo "⚠️  apt-get not found. Please install system graphics libraries manually:"
+            echo "   - cairo development libraries"
+            echo "   - pango development libraries" 
+            echo "   - python3 gobject introspection"
+        fi
     else
-        echo "✅ System dependencies already installed!"
+        echo "📦 Non-Linux OS detected, skipping system package installation"
     fi
 }
 
 # Function to setup Python environment
 setup_python_env() {
-    echo "🔄 Setting up Python environment..."
+    echo "🐍 Setting up Python environment..."
     
-    # Create virtual environment with system site packages if it doesn't exist
-    if [ ! -d "venv" ]; then
-        echo "📦 Creating virtual environment with system site packages..."
-        python3 -m venv --system-site-packages venv
+    # Check if we're in a cloud environment
+    if [ -n "$RENDER" ] || [ -n "$HEROKU" ] || [ -n "$RAILWAY" ]; then
+        echo "☁️  Cloud deployment detected"
+        # In cloud environments, often dependencies are installed differently
+        if [ ! -d ".venv" ]; then
+            python3 -m venv .venv
+        fi
+        source .venv/bin/activate
+    else
+        # Local development setup
+        if [ ! -d "venv" ]; then
+            echo "📦 Creating virtual environment with system site packages..."
+            python3 -m venv --system-site-packages venv
+        fi
+        source venv/bin/activate
     fi
     
-    # Activate virtual environment
-    echo "🔄 Activating virtual environment..."
-    source venv/bin/activate
-    
-    # Install/upgrade Python dependencies
-    echo "📥 Installing Python dependencies..."
+    echo "📥 Installing/updating Python dependencies..."
     pip install --upgrade pip
-    pip install -e .
-    
-    echo "✅ Python environment ready!"
+    pip install -r requirements.txt
 }
 
-# Function to check .env file
-check_env_file() {
-    echo "🔧 Checking configuration..."
-    
+# Function to check environment configuration
+check_config() {
     if [ ! -f ".env" ]; then
-        echo "⚠️ .env file not found!"
-        
         if [ -f ".env.example" ]; then
-            echo "📝 Copying .env.example to .env"
+            echo "⚠️  .env file not found! Creating from example..."
             cp .env.example .env
-            echo "⚠️ Please edit .env file with your Discord bot token!"
-            echo "   nano .env  # Edit BOT_TOKEN=your_actual_token_here"
-            read -p "Press Enter after updating .env file..."
+            echo "📝 Please edit .env with your Discord bot token and other settings"
+            echo "   Required: BOT_TOKEN=your_discord_bot_token_here"
+            if [ -z "$BOT_TOKEN" ]; then
+                echo "❌ BOT_TOKEN environment variable not set and no .env file configured"
+                echo "   Please set BOT_TOKEN in .env file or as environment variable"
+                return 1
+            fi
         else
-            echo "📝 Please create a .env file with your Discord bot token:"
-            echo "   echo 'BOT_TOKEN=your_discord_token_here' > .env"
-            echo "   echo 'LOGGING_COG_CHANNEL_ID=your_channel_id' >> .env"
-            exit 1
+            echo "❌ No .env file found and no BOT_TOKEN environment variable set"
+            echo "📝 Please create a .env file with:"
+            echo "   BOT_TOKEN=your_discord_bot_token_here"
+            echo "   LOGGING_COG_CHANNEL_ID=your_channel_id"
+            return 1
         fi
     fi
     
-    # Check if BOT_TOKEN is set
-    source .env 2>/dev/null || true
-    if [ -z "$BOT_TOKEN" ] || [ "$BOT_TOKEN" = "your_discord_bot_token_here" ]; then
-        echo "❌ BOT_TOKEN not configured in .env file!"
-        echo "📝 Please edit .env and set your actual Discord bot token"
-        exit 1
+    # Load environment variables from .env if it exists
+    if [ -f ".env" ]; then
+        set -a
+        source .env
+        set +a
     fi
     
-    echo "✅ Configuration looks good!"
+    # Check if BOT_TOKEN is set
+    if [ -z "$BOT_TOKEN" ]; then
+        echo "❌ BOT_TOKEN not found in environment or .env file"
+        return 1
+    fi
+    
+    echo "✅ Configuration validated"
 }
 
 # Function to run the bot
 run_bot() {
+    echo ""
     echo "🚀 Starting TLE Bot..."
     echo "💡 Press Ctrl+C to stop the bot"
     echo ""
     
-    # Activate virtual environment and run bot
-    source venv/bin/activate
+    # Activate the appropriate environment
+    if [ -n "$RENDER" ] || [ -n "$HEROKU" ] || [ -n "$RAILWAY" ]; then
+        if [ -f ".venv/bin/activate" ]; then
+            source .venv/bin/activate
+        fi
+    else
+        if [ -f "venv/bin/activate" ]; then
+            source venv/bin/activate
+        fi
+    fi
+    
     python -m tle
 }
 
 # Main execution
-echo "🔍 Performing complete setup check..."
-echo ""
+main() {
+    echo "🚀 TLE Bot Setup and Run Script"
+    echo ""
+    
+    # Check Python version
+    check_python_version
+    
+    # Install system dependencies (only for local Linux)
+    if [ -z "$RENDER" ] && [ -z "$HEROKU" ] && [ -z "$RAILWAY" ]; then
+        install_system_deps
+    fi
+    
+    # Setup Python environment
+    setup_python_env
+    
+    # Check configuration
+    if ! check_config; then
+        exit 1
+    fi
+    
+    # Run the bot
+    run_bot
+}
 
-# Check and install system dependencies
-check_system_deps
-echo ""
-
-# Setup Python environment
-setup_python_env
-echo ""
-
-# Check configuration
-check_env_file
-echo ""
-
-# Run the bot
-run_bot
+# Run main function
+main "$@"

@@ -1,11 +1,11 @@
 [project]
 name = "TLE"
 version = "0.1.0"
-requires-python = ">= 3.9"
+requires-python = ">= 3.9, < 3.14"
 dependencies = [
   # Discord bot core
   "discord.py == 1.7.3",
-  "aiohttp < 3.8",
+  "aiohttp >= 3.8.0",
   "aiocache",
   # Data & plotting
   "numpy",
