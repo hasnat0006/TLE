@@ -12,6 +12,7 @@ matplotlib
 seaborn
 cycler
 pycairo
+PyNaCl
 
 # Image processing
 pillow
