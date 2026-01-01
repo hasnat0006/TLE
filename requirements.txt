@@ -18,5 +18,8 @@ pillow
 # Web scraping and parsing
 lxml
 
+# Environment variables
+python-dotenv
+
 # Development and testing (optional)
 pytest

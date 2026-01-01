@@ -10,6 +10,7 @@ import discord
 import seaborn as sns
 from discord.ext import commands
 from matplotlib import pyplot as plt
+from dotenv import load_dotenv
 
 from tle import constants
 from tle.util import codeforces_common as cf_common, discord_common, font_downloader
@@ -64,6 +65,9 @@ def strtobool(value: str) -> bool:
 
 
 def main():
+    # Load environment variables from .env file
+    load_dotenv()
+    
     parser = argparse.ArgumentParser()
     parser.add_argument('--nodb', action='store_true')
     args = parser.parse_args()

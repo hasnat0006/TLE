@@ -5,8 +5,7 @@ TLE is a feature-packed Discord bot aimed at competitive programmers
 It can recommend problems, show stats & graphs, run duels on your server
 and manage starboards – all with a single prefix `;`.
 
-If you have Docker ≥ 24 (or Docker Desktop on Win/Mac) you are ready to
-go.
+This setup runs without Docker - just Python and system dependencies.
 
 ---
 
@@ -22,8 +21,7 @@ go.
 | **Starboard** | pins popular messages to a channel |
 | **CacheControl** | warm-up & manage local caches |
 
-All graphs require cairo + pango; the Docker image already contains
-everything.
+All graphs require cairo + pango; these are installed via the setup script.
 
 ---
 
@@ -34,11 +32,22 @@ everything.
 git clone https://github.com/cheran-senthil/TLE
 cd TLE
 
-# 2 · create a config file
-cp .env.example .env          # then edit BOT_TOKEN, LOGGING_COG_CHANNEL_ID …
+# 2 · install system dependencies (one-time setup)
+chmod +x install_deps.sh
+./install_deps.sh
 
-# 3 · build & start the bot (first run takes ~2 min)
-docker compose up -d
+# 3 · setup Python environment
+chmod +x setup.sh
+./setup.sh
+
+# 4 · create a config file
+cp .env.example .env          # then edit BOT_TOKEN, LOGGING_COG_CHANNEL_ID …
+# or create manually:
+echo "BOT_TOKEN=your_discord_token_here" > .env
+
+# 5 · run the bot
+source venv/bin/activate
+python -m tle
 ```
 
 That’s it.  
@@ -49,9 +58,35 @@ The bot will appear online in your Discord server; use
 
 ```sh
 git pull
-docker compose build --pull    # fetch newer base images
-docker compose up -d           # zero-downtime restart
+source venv/bin/activate
+pip install -e .
+# Restart the bot
+python -m tle
 ```
+
+### Manual Setup (Alternative)
+
+If you prefer manual setup:
+
+1. **Install system dependencies**:
+   ```bash
+   # On Ubuntu/Debian:
+   sudo apt-get update
+   sudo apt-get install -y libcairo2-dev libgirepository1.0-dev python3-gi python3-gi-cairo python3-cairo libjpeg-dev zlib1g-dev pkg-config
+   ```
+
+2. **Create virtual environment**:
+   ```bash
+   python3 -m venv --system-site-packages venv
+   source venv/bin/activate
+   pip install -e .
+   ```
+
+3. **Create config and run**:
+   ```bash
+   echo "BOT_TOKEN=your_token_here" > .env
+   python -m tle
+   ```
 
 ---
 
@@ -65,8 +100,7 @@ docker compose up -d           # zero-downtime restart
 | `TLE_ADMIN` | ❌ | `Admin` | role name that can run admin cmds |
 | `TLE_MODERATOR` | ❌ | `Moderator` | role name that can run mod cmds |
 
-Feel free to add any extra variables your cogs consume; Compose passes
-every key in `.env` to the container.
+Feel free to add any extra variables your Python environment needs.
 
 ---
 

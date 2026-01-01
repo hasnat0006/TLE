@@ -14,9 +14,21 @@ dependencies = [
   "seaborn",
   # Images
   "pillow",
+  # Web scraping
+  "lxml",
+  # Environment variables
+  "python-dotenv",
 ]
 
 [project.optional-dependencies]
 test = [
   "pytest",
 ]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["tle*"]
+exclude = ["data*", "logs*", "extra*"]
