@@ -9,7 +9,6 @@ import random
 
 import cairo
 import discord
-import gi
 from PIL import Image, ImageDraw, ImageFont
 from discord.ext import commands
 
@@ -26,9 +25,80 @@ from tle.util import (
     tasks,
 )
 
-gi.require_version('Pango', '1.0')
-gi.require_version('PangoCairo', '1.0')
-from gi.repository import Pango, PangoCairo
+# Optional Pango support for better text rendering
+try:
+    import gi
+    gi.require_version('Pango', '1.0')
+    gi.require_version('PangoCairo', '1.0')
+    from gi.repository import Pango, PangoCairo
+    PANGO_AVAILABLE = True
+except ImportError:
+    PANGO_AVAILABLE = False
+    # Fallback for cloud environments without gi/Pango
+    logging.warning("Pango not available, using fallback text rendering")
+
+def get_gudgitters_image_fallback(rankings):
+    """Fallback PIL-only implementation for rankings when Pango is not available"""
+    from PIL import Image, ImageDraw, ImageFont
+    import os
+    
+    WIDTH = 900
+    HEIGHT = 450
+    BORDER_MARGIN = 20
+    DISCORD_GRAY_RGB = (54, 62, 63)  # Convert from float
+    ROW_COLORS = ((242, 242, 242), (229, 229, 229))  # Convert from float
+    
+    # Create image
+    img = Image.new('RGB', (WIDTH, HEIGHT), color=DISCORD_GRAY_RGB)
+    draw = ImageDraw.Draw(img)
+    
+    # Try to load a font, fall back to default if needed
+    try:
+        font_path = os.path.join('data', 'assets', 'fonts', 'NotoSansCJK-Regular.ttc')
+        if os.path.exists(font_path):
+            font = ImageFont.truetype(font_path, 18)
+        else:
+            font = ImageFont.load_default()
+    except:
+        font = ImageFont.load_default()
+    
+    # Draw header
+    y = BORDER_MARGIN
+    header_height = 30
+    draw.rectangle([0, y, WIDTH, y + header_height], fill=ROW_COLORS[0])
+    draw.text((BORDER_MARGIN, y + 5), "Rank  Username               Handle                 Rating", 
+              fill=(0, 0, 0), font=font)
+    y += header_height + 5
+    
+    # Draw rankings
+    row_height = 25
+    for i, ranking in enumerate(rankings[:10]):  # Limit to 10 rows
+        if i >= 10:
+            break
+            
+        # Alternate row colors
+        color_idx = i % 2
+        draw.rectangle([0, y, WIDTH, y + row_height], fill=ROW_COLORS[color_idx])
+        
+        # Get color for rating
+        rating = getattr(ranking, 'rating', 0)
+        color_rgb = (0, 0, 0)  # Default black
+        
+        # Format text
+        pos = str(getattr(ranking, 'pos', i + 1))
+        username = str(getattr(ranking, 'username', 'N/A'))[:15]  # Truncate
+        handle = str(getattr(ranking, 'handle', 'N/A'))[:15]      # Truncate
+        rating_text = str(rating)
+        
+        # Draw text columns
+        draw.text((BORDER_MARGIN, y + 3), f"{pos:>3}", fill=color_rgb, font=font)
+        draw.text((BORDER_MARGIN + 60, y + 3), username, fill=color_rgb, font=font)
+        draw.text((BORDER_MARGIN + 320, y + 3), handle, fill=color_rgb, font=font)
+        draw.text((BORDER_MARGIN + 580, y + 3), rating_text, fill=color_rgb, font=font)
+        
+        y += row_height
+    
+    return img
 
 _HANDLES_PER_PAGE = 15
 _NAME_MAX_LEN = 20
@@ -83,6 +153,9 @@ FONTS = [
 
 def get_gudgitters_image(rankings):
     """return PIL image for rankings"""
+    if not PANGO_AVAILABLE:
+        return get_gudgitters_image_fallback(rankings)
+    
     SMOKE_WHITE = (250, 250, 250)
     BLACK = (0, 0, 0)
 
