@@ -5,12 +5,15 @@ import os
 from logging.handlers import TimedRotatingFileHandler
 from os import environ
 from pathlib import Path
+import threading
 
 import discord
 import seaborn as sns
 from discord.ext import commands
 from matplotlib import pyplot as plt
 from dotenv import load_dotenv
+from fastapi import FastAPI
+import uvicorn
 
 from tle import constants
 from tle.util import codeforces_common as cf_common, discord_common, font_downloader
@@ -64,17 +67,50 @@ def strtobool(value: str) -> bool:
     raise ValueError(f'Invalid truth value {value!r}.')
 
 
+def create_web_app():
+    """Create FastAPI web application"""
+    app = FastAPI(title="TLE Web Service", version="1.0.0", description="TLE Discord Bot Web API")
+    
+    @app.get("/")
+    async def root():
+        return {"message": "TLE Web Service is running", "status": "healthy"}
+    
+    @app.get("/health")
+    async def health_check():
+        return {"status": "healthy"}
+    
+    return app
+
+
+def run_web_service(port: int, host: str = "0.0.0.0"):
+    """Run the web service"""
+    app = create_web_app()
+    uvicorn.run(app, host=host, port=port, log_level="info")
+
+
 def main():
     # Load environment variables from .env file
     load_dotenv()
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--nodb', action='store_true')
+    parser.add_argument('--web-only', action='store_true', help='Run only web service')
+    parser.add_argument('--port', type=int, default=8000, help='Port for web service')
+    parser.add_argument('--host', default='0.0.0.0', help='Host for web service')
     args = parser.parse_args()
 
     token = environ.get('BOT_TOKEN')
+    
+    # Handle web-only mode
+    if args.web_only:
+        logging.info(f"Starting TLE web service on {args.host}:{args.port}")
+        setup()
+        run_web_service(args.port, args.host)
+        return
+    
     if not token:
-        logging.error('Token required')
+        logging.error('BOT_TOKEN required for Discord bot mode')
+        logging.info('Use --web-only flag to run only the web service')
         return
 
     allow_self_register = environ.get('ALLOW_DUEL_SELF_REGISTER')
@@ -82,6 +118,13 @@ def main():
         constants.ALLOW_DUEL_SELF_REGISTER = strtobool(allow_self_register)
 
     setup()
+
+    # Start web service in background thread if port is specified
+    web_thread = None
+    if args.port and not args.web_only:
+        logging.info(f"Starting web service on {args.host}:{args.port}")
+        web_thread = threading.Thread(target=run_web_service, args=(args.port, args.host), daemon=True)
+        web_thread.start()
 
     intents = discord.Intents.default()
     intents.members = True
@@ -108,7 +151,14 @@ def main():
         asyncio.create_task(discord_common.presence(bot))
 
     bot.add_listener(discord_common.bot_error_handler, name='on_command_error')
-    bot.run(token)
+    
+    try:
+        bot.run(token)
+    except KeyboardInterrupt:
+        logging.info("Bot stopped by user")
+    finally:
+        if web_thread and web_thread.is_alive():
+            logging.info("Web service will stop with the main process")
 
 
 if __name__ == '__main__':

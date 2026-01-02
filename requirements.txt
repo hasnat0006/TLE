@@ -23,5 +23,9 @@ lxml
 # Environment variables
 python-dotenv
 
+# Web framework
+fastapi
+uvicorn
+
 # Development and testing (optional)
 pytest
