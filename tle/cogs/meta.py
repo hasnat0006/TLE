@@ -92,7 +92,7 @@ class Meta(commands.Cog):
     async def uptime(self, ctx):
         """Replies with how long TLE has been up."""
         await ctx.send(
-            'TLE has been running for '
+            'MCC_BOT has been running for '
             + pretty_time_format(time.time() - self.start_time)
         )
 

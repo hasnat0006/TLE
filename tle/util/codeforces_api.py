@@ -445,6 +445,84 @@ class contest:
         return [make_from_dict(Contest, contest_dict) for contest_dict in resp]
 
     @staticmethod
+    async def standings_paginated(
+        *,
+        contest_id: Any,
+        page_size: int = 1000,
+        max_participants: Optional[int] = None,
+        **kwargs
+    ) -> tuple[Contest, list[Problem], list[RanklistRow]]:
+        """
+        Memory-efficient paginated version of standings API.
+        
+        Args:
+            contest_id: Contest ID
+            page_size: Number of participants to fetch per page (default: 1000)
+            max_participants: Maximum total participants to fetch (default: unlimited)
+            **kwargs: Other parameters passed to standings()
+        
+        Returns:
+            Same as standings() but fetched in chunks to reduce memory usage
+        """
+        all_participants = []
+        contest_info = None
+        problems = None
+        from_ = 1
+        
+        logger.info(f'Starting paginated fetch for contest {contest_id} with page_size={page_size}')
+        
+        while True:
+            # Determine count for this batch
+            count = page_size
+            if max_participants is not None:
+                remaining = max_participants - len(all_participants)
+                if remaining <= 0:
+                    break
+                count = min(count, remaining)
+            
+            logger.info(f'Fetching participants {from_} to {from_ + count - 1}')
+            
+            contest_info, problems, participants = await contest.standings(
+                contest_id=contest_id,
+                from_=from_,
+                count=count,
+                **kwargs
+            )
+            
+            if not participants:
+                # No more participants
+                break
+                
+            all_participants.extend(participants)
+            from_ += len(participants)
+            
+            # If we got fewer participants than requested, we've reached the end
+            if len(participants) < count:
+                break
+        
+        logger.info(f'Fetched {len(all_participants)} total participants for contest {contest_id}')
+        return contest_info, problems, all_participants
+
+    @staticmethod
+    async def ratingChanges(*, contest_id: Any) -> list[RatingChange]:
+        """Returns a list of rating changes for a contest."""
+        params = {'contestId': contest_id}
+        try:
+            resp = await _query_api('contest.ratingChanges', params)
+        except TrueApiError as e:
+            if 'not found' in e.comment:
+                raise ContestNotFoundError(e.comment, contest_id)
+            if 'Rating changes are unavailable' in e.comment:
+                raise RatingChangesUnavailableError(e.comment, contest_id)
+            raise
+        return [make_from_dict(RatingChange, change_dict) for change_dict in resp]
+        params = {}
+        if gym is not None:
+            params['gym'] = _bool_to_str(gym)
+        resp = await _query_api('contest.list', params)
+        return [make_from_dict(Contest, contest_dict) for contest_dict in resp]
+
+    @staticmethod
     async def ratingChanges(*, contest_id: Any) -> list[RatingChange]:
         """Returns a list of rating changes for a contest."""
         params = {'contestId': contest_id}
@@ -479,6 +557,15 @@ class contest:
             params['room'] = room
         if show_unofficial is not None:
             params['showUnofficial'] = _bool_to_str(show_unofficial)
+            
+        # Add memory usage warning for large standings requests
+        if from_ is None and count is None and handles is None:
+            logger.warning(
+                f'contest.standings called for contest {contest_id} without pagination '
+                'parameters (from_, count, handles). Large contests can have 10,000+ '
+                'participants consuming significant memory. Consider using pagination.'
+            )
+            
         try:
             resp = await _query_api('contest.standings', params)
         except TrueApiError as e:
@@ -489,6 +576,11 @@ class contest:
         problems = [
             make_from_dict(Problem, problem_dict) for problem_dict in resp['problems']
         ]
+        
+        # Log standings size for memory monitoring
+        participant_count = len(resp['rows'])
+        logger.info(f'Processing standings for {participant_count} participants in contest {contest_id}')
+        
         for row in resp['rows']:
             row['party']['members'] = [
                 make_from_dict(Member, member) for member in row['party']['members']
@@ -505,15 +597,32 @@ class contest:
 class problemset:
     @staticmethod
     async def problems(
-        *, tags=None, problemset_name=None
+        *, tags=None, problemset_name=None, limit_memory_usage=True
     ) -> tuple[list[Problem], list[ProblemStatistics]]:
-        """Returns a list of problems."""
+        """Returns a list of problems.
+        
+        Warning: This API call returns ALL Codeforces problems (~30,000+ problems)
+        which can consume 100+ MB of memory. Use tags parameter to filter results.
+        """
         params = {}
         if tags is not None:
             params['tags'] = ';'.join(tags)
         if problemset_name is not None:
             params['problemsetName'] = problemset_name
+            
+        # Log memory usage warning for large requests
+        if tags is None and problemset_name is None:
+            logger.warning(
+                'problemset.problems called without filters - this will load ~30,000+ problems '
+                'consuming significant memory (~100+ MB). Consider using tags parameter.'
+            )
+            
         resp = await _query_api('problemset.problems', params)
+        
+        # Log actual data size for monitoring
+        problem_count = len(resp['problems'])
+        logger.info(f'Loading {problem_count} problems into memory')
+        
         problems = [
             make_from_dict(Problem, problem_dict) for problem_dict in resp['problems']
         ]

@@ -581,6 +581,7 @@ class RanklistNotMonitored(RanklistCacheError):
 
 class RanklistCache:
     _RELOAD_DELAY = 2 * 60
+    _MAX_CONTEST_AGE = 7 * 24 * 60 * 60  # 1 week in seconds
 
     def __init__(self, cache_master):
         self.cache_master = cache_master
@@ -604,7 +605,13 @@ class RanklistCache:
     )
     async def _update_task(self, _):
         contests_by_phase = self.cache_master.contest_cache.contests_by_phase
-        running_contests = contests_by_phase['_RUNNING']
+        now = time.time()
+        
+        # Filter running contests to exclude those stuck in invalid states for too long
+        running_contests = [
+            contest for contest in contests_by_phase['_RUNNING']
+            if now - contest.end_time < self._MAX_CONTEST_AGE
+        ]
 
         rating_cache = self.cache_master.rating_changes_cache
         finished_contests = [
@@ -612,6 +619,7 @@ class RanklistCache:
             for contest in contests_by_phase['FINISHED']
             if not _is_blacklisted(contest)
             and rating_cache.is_newly_finished_without_rating_changes(contest)
+            and now - contest.end_time < self._MAX_CONTEST_AGE
         ]
 
         to_monitor = running_contests + finished_contests
@@ -631,10 +639,12 @@ class RanklistCache:
     )
     async def _monitor_task(self, _):
         cache = self.cache_master.rating_changes_cache
+        now = time.time()
         self.monitored_contests = [
             contest
             for contest in self.monitored_contests
             if not _is_blacklisted(contest)
+            and now - contest.end_time < self._MAX_CONTEST_AGE
             and (
                 contest.phase != 'FINISHED'
                 or cache.is_newly_finished_without_rating_changes(contest)
