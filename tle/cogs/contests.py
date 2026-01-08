@@ -979,24 +979,35 @@ class Contests(commands.Cog):
         await ctx.send(embed=embed, file=discord_file)
 
     @staticmethod
-    def _make_cf_rating_changes_embed(guild, contest_id, rating_changes):
-        """Make an embed containing rating changes for a Codeforces contest."""
+    def _make_cf_rating_changes_embeds(guild, contest_id, rating_changes):
+        """Make embeds containing rating changes for a Codeforces contest.
+        Returns a list of embeds: [contest_embed, rank_updates_embed, rating_changes_embed]"""
         contest = cf_common.cache2.contest_cache.get_contest(contest_id)
-        user_id_handle_pairs = cf_common.user_db.get_handles_for_guild(guild.id)
-        guild_handles = {handle.lower() for _, handle in user_id_handle_pairs}
-        
-        # Filter rating changes to only include server members
+
+        handle_to_member = {
+            handle.lower(): guild.get_member(int(user_id))
+            for user_id, handle in cf_common.user_db.get_handles_for_guild(guild.id)
+        }
+
         member_changes = [
-            change for change in rating_changes 
-            if change.handle.lower() in guild_handles
+            (change, handle_to_member.get(change.handle.lower()))
+            for change in rating_changes
+            if handle_to_member.get(change.handle.lower()) is not None
         ]
-        
+
         if not member_changes:
             embed = discord_common.cf_color_embed(title=contest.name, url=contest.url)
             embed.set_author(name='Rating Updates')
             embed.description = 'No rating changes found for server members'
-            return embed
+            return [embed]
+
+        embeds = []
         
+        # First message: Contest name
+        contest_embed = discord_common.cf_color_embed(title=contest.name, url=contest.url)
+        contest_embed.set_author(name='Contest Updates')
+        embeds.append(contest_embed)
+
         rank_to_role = {role.name: role for role in guild.roles}
 
         def rating_to_displayable_rank(rating):
@@ -1006,40 +1017,99 @@ class Contests(commands.Cog):
 
         # Rank changes (promotions/demotions)
         rank_changes_str = []
-        for change in member_changes:
+        for change, member in member_changes:
             old_role = rating_to_displayable_rank(change.oldRating)
             new_role = rating_to_displayable_rank(change.newRating)
             if new_role != old_role:
-                rank_change_str = f'[{discord.utils.escape_markdown(change.handle)}]({cf.PROFILE_BASE_URL}{change.handle}): {old_role} \N{LONG RIGHTWARDS ARROW} {new_role}'
+                mention = member.mention if member else ''
+                handle_str = f'[{discord.utils.escape_markdown(change.handle)}]({cf.PROFILE_BASE_URL}{change.handle})'
+                rank_change_str = f'{mention} {handle_str}: {old_role} \N{LONG RIGHTWARDS ARROW} {new_role}'
                 rank_changes_str.append(rank_change_str)
 
-        # Sort by rating delta for top increases
-        member_changes_sorted = sorted(member_changes, 
-                                     key=lambda x: x.newRating - x.oldRating, 
+        # All rating changes
+        member_changes_sorted = sorted(member_changes,
+                                     key=lambda x: x[0].newRating - x[0].oldRating,
                                      reverse=True)
-        
-        # Top rating increases (show top 10)
-        rating_increases_str = []
-        for change in member_changes_sorted[:10]:
-            delta = change.newRating - change.oldRating
-            if delta > 0:  # Only show increases
-                rating_change_str = f'[{discord.utils.escape_markdown(change.handle)}]({cf.PROFILE_BASE_URL}{change.handle}): {change.oldRating} \N{HORIZONTAL BAR} **+{delta}** \N{LONG RIGHTWARDS ARROW} {change.newRating}'
-                rating_increases_str.append(rating_change_str)
 
-        desc = '\n'.join(rank_changes_str[:10]) or 'No rank changes'  # Limit to 10
-        embed = discord_common.cf_color_embed(
-            title=contest.name, url=contest.url, description=desc
-        )
-        embed.set_author(name='Rating Updates')
-        
-        if rating_increases_str:
-            embed.add_field(
-                name='Top rating increases',
-                value='\n'.join(rating_increases_str),
-                inline=False,
-            )
-        
-        return embed
+        rating_changes_str = []
+        for change, member in member_changes_sorted:
+            delta = change.newRating - change.oldRating
+            mention = member.mention if member else ''
+            handle_str = f'[{discord.utils.escape_markdown(change.handle)}]({cf.PROFILE_BASE_URL}{change.handle})'
+            rating_change_str = f'{mention} {handle_str}: {change.oldRating} \N{HORIZONTAL BAR} **{delta:+}** \N{LONG RIGHTWARDS ARROW} {change.newRating}'
+            rating_changes_str.append(rating_change_str)
+
+        # Second message: Rank Updates
+        if rank_changes_str:
+            rank_embed = discord_common.cf_color_embed()
+            rank_embed.set_author(name='Rank Updates')
+            
+            # Split rank changes into multiple fields if needed (Discord limit: 1024 chars per field)
+            current_field = []
+            current_length = 0
+            field_num = 1
+            
+            for change_str in rank_changes_str:
+                change_len = len(change_str) + 1  # +1 for newline
+                if current_length + change_len > 1024 and current_field:
+                    field_name = '\u200b' if field_num == 1 else f'(continued)'
+                    rank_embed.add_field(
+                        name=field_name,
+                        value='\n'.join(current_field),
+                        inline=False,
+                    )
+                    current_field = []
+                    current_length = 0
+                    field_num += 1
+                current_field.append(change_str)
+                current_length += change_len
+            
+            if current_field:
+                field_name = '\u200b' if field_num == 1 else f'(continued)'
+                rank_embed.add_field(
+                    name=field_name,
+                    value='\n'.join(current_field),
+                    inline=False,
+                )
+            
+            embeds.append(rank_embed)
+
+        # Third message: Rating Changes
+        if rating_changes_str:
+            rating_embed = discord_common.cf_color_embed()
+            rating_embed.set_author(name='Rating Changes')
+            
+            # Split rating changes into multiple fields if needed (Discord limit: 1024 chars per field)
+            current_field = []
+            current_length = 0
+            field_num = 1
+            
+            for change_str in rating_changes_str:
+                change_len = len(change_str) + 1  # +1 for newline
+                if current_length + change_len > 1024 and current_field:
+                    field_name = '\u200b' if field_num == 1 else f'(continued)'
+                    rating_embed.add_field(
+                        name=field_name,
+                        value='\n'.join(current_field),
+                        inline=False,
+                    )
+                    current_field = []
+                    current_length = 0
+                    field_num += 1
+                current_field.append(change_str)
+                current_length += change_len
+            
+            if current_field:
+                field_name = '\u200b' if field_num == 1 else f'(continued)'
+                rating_embed.add_field(
+                    name=field_name,
+                    value='\n'.join(current_field),
+                    inline=False,
+                )
+            
+            embeds.append(rating_embed)
+
+        return embeds
 
     @commands.command(brief='Show rating changes for server members after a contest')
     async def ratingchanges(self, ctx, contest_id: int):
@@ -1063,8 +1133,9 @@ class Contests(commands.Cog):
         if not rating_changes:
             raise ContestCogError(f'No rating changes found for contest `{contest.name}`')
         
-        embed = self._make_cf_rating_changes_embed(ctx.guild, contest_id, rating_changes)
-        await ctx.send(embed=embed)
+        embeds = self._make_cf_rating_changes_embeds(ctx.guild, contest_id, rating_changes)
+        for embed in embeds:
+            await ctx.send(embed=embed)
 
     @tasks.task_spec(
         name='WatchRatingChanges',
@@ -1086,10 +1157,11 @@ class Contests(commands.Cog):
                 if channel is None:
                     continue
                     
-                embed = self._make_cf_rating_changes_embed(guild, contest.id, rating_changes)
+                embeds = self._make_cf_rating_changes_embeds(guild, contest.id, rating_changes)
                 # Only send if there are actual changes for server members
-                if embed.description != 'No rating changes found for server members':
-                    await channel.send(embed=embed)
+                if len(embeds) > 1 or embeds[0].description != 'No rating changes found for server members':
+                    for embed in embeds:
+                        await channel.send(embed=embed)
                     
             except Exception as e:
                 self.logger.error(f'Error posting rating changes for guild {guild.id}: {e}')

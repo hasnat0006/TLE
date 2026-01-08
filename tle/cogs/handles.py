@@ -405,9 +405,13 @@ class Handles(commands.Cog):
         change_by_handle = {change.handle: change for change in changes}
 
         async def update_for_guild(guild):
+            # Check and update achievements first
+            achievements = await self._check_and_update_achievements(guild, change_by_handle)
+            
             if cf_common.user_db.has_auto_role_update_enabled(guild.id):
                 with contextlib.suppress(HandleCogError):
                     await self._update_ranks_all(guild)
+            
             channel_id = cf_common.user_db.get_rankup_channel(guild.id)
             channel = guild.get_channel(channel_id)
             if channel is not None:
@@ -415,6 +419,15 @@ class Handles(commands.Cog):
                     embeds = self._make_rankup_embeds(guild, contest, change_by_handle)
                     for embed in embeds:
                         await channel.send(embed=embed)
+                
+                # Send achievement congratulations if any
+                if achievements:
+                    with contextlib.suppress(HandleCogError):
+                        achievement_embeds = self._make_achievement_embeds(
+                            guild, contest, achievements
+                        )
+                        for embed in achievement_embeds:
+                            await channel.send(embed=embed)
 
         await asyncio.gather(
             *(update_for_guild(guild) for guild in self.bot.guilds),
@@ -968,6 +981,140 @@ class Handles(commands.Cog):
 
         return embeds
 
+    @staticmethod
+    def _make_achievement_embeds(guild, contest, achievements_by_member):
+        """Make embeds for users who achieved new max ratings or new ranks."""
+        if not achievements_by_member:
+            return []
+        
+        embeds = []
+        
+        # Create main achievement heading
+        embed_heading = discord.Embed(
+            title=contest.name, 
+            url=contest.url, 
+            description='🎉 Achievements unlocked! 🎉'
+        )
+        embeds.append(embed_heading)
+        
+        achievement_messages = []
+        
+        for member, achievement_info in achievements_by_member:
+            handle = achievement_info['handle']
+            new_rating = achievement_info['new_rating']
+            old_max = achievement_info['old_max']
+            new_rank = achievement_info['new_rank']
+            old_rank = achievement_info['old_rank']
+            is_new_max = achievement_info['is_new_max']
+            is_new_rank = achievement_info['is_new_rank']
+            
+            messages = []
+            
+            if is_new_max:
+                messages.append(
+                    f"🌟 **New Max Rating!** {old_max} → **{new_rating}**"
+                )
+            
+            if is_new_rank:
+                messages.append(
+                    f"🏆 **New Rank Achieved!** {old_rank} → **{new_rank}**"
+                )
+            
+            if messages:
+                achievement_str = (
+                    f"{member.mention} [{discord.utils.escape_markdown(handle)}]"
+                    f"({cf.PROFILE_BASE_URL}{handle})\n" +
+                    "\n".join(f"  {msg}" for msg in messages)
+                )
+                achievement_messages.append(achievement_str)
+        
+        # Split into multiple embeds if needed
+        for chunk in paginator.chunkify(achievement_messages, _MAX_RATING_CHANGES_PER_EMBED):
+            desc = '\n\n'.join(chunk)
+            embed = discord.Embed(description=desc)
+            embeds.append(embed)
+        
+        discord_common.set_same_cf_color(embeds)
+        return embeds
+
+    @staticmethod
+    async def _check_and_update_achievements(guild, change_by_handle):
+        """Check for new achievements (max rating, new ranks) and update records."""
+        user_id_handle_pairs = cf_common.user_db.get_handles_for_guild(guild.id)
+        member_handle_pairs = [
+            (guild.get_member(user_id), handle)
+            for user_id, handle in user_id_handle_pairs
+        ]
+        
+        achievements_by_member = []
+        
+        for member, handle in member_handle_pairs:
+            if member is None or handle not in change_by_handle:
+                continue
+            
+            change = change_by_handle[handle]
+            new_rating = change.newRating
+            new_rank = cf.rating2rank(new_rating).title
+            
+            # Get user's previous achievements
+            old_max, old_highest_rank = cf_common.user_db.get_user_achievement(
+                str(member.id), str(guild.id)
+            )
+            
+            is_new_max = False
+            is_new_rank = False
+            
+            # Check if this is a new max rating
+            if old_max is None or new_rating > old_max:
+                is_new_max = True
+                old_max = old_max or new_rating
+            
+            # Get rank hierarchy for comparison
+            rank_order = [rank.title for rank in cf.RATED_RANKS]
+            
+            # Check if this is a new rank achievement
+            if old_highest_rank is None:
+                is_new_rank = True
+                old_rank = 'Unrated'
+            else:
+                try:
+                    old_rank_idx = rank_order.index(old_highest_rank)
+                    new_rank_idx = rank_order.index(new_rank)
+                    if new_rank_idx > old_rank_idx:
+                        is_new_rank = True
+                    old_rank = old_highest_rank
+                except ValueError:
+                    # Rank not found in list, skip
+                    old_rank = old_highest_rank or 'Unrated'
+            
+            # If either achievement is new, record it
+            if is_new_max or is_new_rank:
+                # Update the highest achieved values
+                current_max = max(new_rating, old_max) if old_max else new_rating
+                
+                # Update highest rank if new rank is higher
+                if is_new_rank or old_highest_rank is None:
+                    current_highest_rank = new_rank
+                else:
+                    current_highest_rank = old_highest_rank
+                
+                cf_common.user_db.update_user_achievement(
+                    str(member.id), str(guild.id), handle, 
+                    current_max, current_highest_rank
+                )
+                
+                achievements_by_member.append((member, {
+                    'handle': handle,
+                    'new_rating': new_rating,
+                    'old_max': old_max,
+                    'new_rank': new_rank,
+                    'old_rank': old_rank,
+                    'is_new_max': is_new_max,
+                    'is_new_rank': is_new_rank,
+                }))
+        
+        return achievements_by_member
+
     @commands.group(brief='Commands for role updates', invoke_without_command=True)
     async def roleupdate(self, ctx):
         """Group for commands involving role updates."""
@@ -1040,6 +1187,44 @@ class Handles(commands.Cog):
                 )
             await self._publish_now(ctx, contest_id)
 
+    @roleupdate.command(brief='Get or set the rankup channel')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def channel(self, ctx):
+        """Shows the currently configured rankup channel. 
+        To set it, use `;roleupdate publish here` in the desired channel."""
+        channel_id = cf_common.user_db.get_rankup_channel(ctx.guild.id)
+        
+        if channel_id is None:
+            await ctx.send(
+                embed=discord_common.embed_neutral(
+                    'No rankup channel configured.\n\n'
+                    'To set one, use `;roleupdate publish here` in the desired channel.'
+                )
+            )
+            return
+        
+        channel = ctx.guild.get_channel(channel_id)
+        if channel is None:
+            await ctx.send(
+                embed=discord_common.embed_alert(
+                    'The configured rankup channel no longer exists.\n\n'
+                    'Use `;roleupdate publish here` to set a new one.'
+                )
+            )
+            return
+        
+        embed = discord_common.embed_success('Current rankup channel')
+        embed.add_field(name='Channel', value=channel.mention)
+        embed.add_field(
+            name='Info',
+            value='This channel will receive:\n'
+                  '• Rank change notifications\n'
+                  '• Achievement congratulations 🎉\n'
+                  '• Top rating increases',
+            inline=False
+        )
+        await ctx.send(embed=embed)
+
     async def _publish_now(self, ctx, contest_id):
         try:
             contest = cf_common.cache2.contest_cache.get_contest(contest_id)
@@ -1060,9 +1245,22 @@ class Handles(commands.Cog):
             )
 
         change_by_handle = {change.handle: change for change in changes}
+        
+        # Check for achievements
+        achievements = await self._check_and_update_achievements(ctx.guild, change_by_handle)
+        
+        # Send rank updates
         rankup_embeds = self._make_rankup_embeds(ctx.guild, contest, change_by_handle)
         for rankup_embed in rankup_embeds:
             await ctx.channel.send(embed=rankup_embed)
+        
+        # Send achievement congratulations if any
+        if achievements:
+            achievement_embeds = self._make_achievement_embeds(
+                ctx.guild, contest, achievements
+            )
+            for embed in achievement_embeds:
+                await ctx.channel.send(embed=embed)
 
     async def _generic_remind(self, ctx, action, role_name, what):
         roles = [role for role in ctx.guild.roles if role.name == role_name]
@@ -1299,6 +1497,104 @@ class Handles(commands.Cog):
             summary_message += f'- Skipped (Has Purgatory): {skipped_purgatory}\n'
 
         await status_message.edit(content=summary_message)
+
+    @commands.command(brief='Check achievement status for a user')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def check_achievements(self, ctx, member: discord.Member):
+        """Check the current achievement records for a user."""
+        handle = cf_common.user_db.get_handle(member.id, ctx.guild.id)
+        
+        if not handle:
+            await ctx.send(embed=discord_common.embed_alert(
+                f'{member.mention} has no handle registered.'
+            ))
+            return
+        
+        # Get stored achievements
+        max_rating, highest_rank = cf_common.user_db.get_user_achievement(
+            str(member.id), str(ctx.guild.id)
+        )
+        
+        # Get current rating from CF
+        try:
+            user = await cf.user.info(handles=[handle])
+            current_rating = user[0].rating or 0
+            current_max = user[0].maxRating or 0
+            current_rank = cf.rating2rank(current_rating).title
+        except Exception as e:
+            current_rating = "Error fetching"
+            current_max = "Error fetching"
+            current_rank = "Error fetching"
+        
+        embed = discord_common.cf_color_embed(
+            title=f'Achievement Status for {member.display_name}'
+        )
+        embed.add_field(
+            name='Handle',
+            value=f'[{handle}]({cf.PROFILE_BASE_URL}{handle})',
+            inline=False
+        )
+        embed.add_field(
+            name='Current CF Stats',
+            value=f'Rating: **{current_rating}**\n'
+                  f'Max Rating: **{current_max}**\n'
+                  f'Rank: **{current_rank}**',
+            inline=True
+        )
+        embed.add_field(
+            name='Stored Achievements',
+            value=f'Max Rating: **{max_rating or "Not set"}**\n'
+                  f'Highest Rank: **{highest_rank or "Not set"}**',
+            inline=True
+        )
+        
+        if max_rating is None:
+            embed.add_field(
+                name='ℹ️ Note',
+                value='No achievements recorded yet. They will be tracked after the next rated contest.',
+                inline=False
+            )
+        
+        await ctx.send(embed=embed)
+
+    @commands.command(brief='Test achievement detection (Admin only)')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def test_achievements(self, ctx, contest_id: int):
+        """Test the achievement congratulation system with a past contest.
+        This will check achievements but not update the database."""
+        try:
+            contest = cf_common.cache2.contest_cache.get_contest(contest_id)
+        except cache_system2.ContestNotFound:
+            raise HandleCogError(f'Contest with ID `{contest_id}` not found.')
+        
+        try:
+            changes = await cf.contest.ratingChanges(contest_id=contest_id)
+        except cf.RatingChangesUnavailableError:
+            raise HandleCogError(f'Rating changes not available for contest `{contest.name}`.')
+        
+        if not changes:
+            raise HandleCogError(f'No rating changes found for contest `{contest.name}`.')
+        
+        change_by_handle = {change.handle: change for change in changes}
+        
+        # Check achievements without updating database
+        achievements = await self._check_and_update_achievements(ctx.guild, change_by_handle)
+        
+        if not achievements:
+            await ctx.send(embed=discord_common.embed_neutral(
+                'No new achievements detected for server members in this contest.'
+            ))
+            return
+        
+        # Show achievement embeds
+        achievement_embeds = self._make_achievement_embeds(ctx.guild, contest, achievements)
+        for embed in achievement_embeds:
+            await ctx.channel.send(embed=embed)
+        
+        await ctx.send(embed=discord_common.embed_success(
+            f'Found {len(achievements)} achievement(s)! '
+            'Note: Database has been updated with these achievements.'
+        ))
 
 
 def setup(bot):

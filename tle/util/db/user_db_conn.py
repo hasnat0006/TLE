@@ -214,6 +214,17 @@ class UserDbConn:
         """)
 
         self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_achievements (
+                user_id TEXT NOT NULL,
+                guild_id TEXT NOT NULL,
+                handle TEXT NOT NULL,
+                max_rating INTEGER NOT NULL,
+                highest_rank TEXT NOT NULL,
+                PRIMARY KEY (user_id, guild_id)
+            )
+        """)
+
+        self.conn.execute("""
             CREATE TABLE IF NOT EXISTS starboard_config_v1 (
                 guild_id TEXT,
                 emoji TEXT,
@@ -1177,6 +1188,27 @@ class UserDbConn:
         query = 'DELETE FROM rating_changes_settings WHERE guild_id = ?'
         with self.conn:
             self.conn.execute(query, (guild_id,))
+
+    def get_user_achievement(self, user_id: str, guild_id: str):
+        """Get user's max rating and highest rank achieved."""
+        query = '''
+            SELECT max_rating, highest_rank
+            FROM user_achievements
+            WHERE user_id = ? AND guild_id = ?
+        '''
+        result = self.conn.execute(query, (user_id, guild_id)).fetchone()
+        return result if result else (None, None)
+
+    def update_user_achievement(self, user_id: str, guild_id: str, handle: str, 
+                                max_rating: int, highest_rank: str):
+        """Update user's max rating and highest rank achieved."""
+        query = '''
+            INSERT OR REPLACE INTO user_achievements 
+            (user_id, guild_id, handle, max_rating, highest_rank)
+            VALUES (?, ?, ?, ?, ?)
+        '''
+        with self.conn:
+            self.conn.execute(query, (user_id, guild_id, handle, max_rating, highest_rank))
 
     def remove_last_ratedvc_participation(self, user_id: str):
         query = 'SELECT MAX(vc_id) AS vc_id FROM rated_vc_users WHERE user_id = ? '
