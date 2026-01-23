@@ -892,7 +892,8 @@ class Handles(commands.Cog):
             idx = len(rows)
             if member == ctx.author:
                 author_idx = idx
-            rows.append((idx, member.display_name, cf_user.handle, cf_user.rating))
+            # Use idx + 1 for 1-based ranking position
+            rows.append((idx + 1, member.display_name, cf_user.handle, cf_user.rating))
 
         if not rows:
             raise HandleCogError('No members with registered handles.')
