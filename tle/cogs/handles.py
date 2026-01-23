@@ -794,18 +794,41 @@ class Handles(commands.Cog):
         if you wish to display only members from those countries. Country data is
         sourced from codeforces profiles. e.g. ;handle list Croatia Slovenia
         """
+        # Fetch fresh data from Codeforces API
+        user_id_handle_pairs = cf_common.user_db.get_handles_for_guild(ctx.guild.id)
+        if not user_id_handle_pairs:
+            raise HandleCogError('No members with registered handles.')
+        
+        # Get all handles
+        handles = [handle for _, handle in user_id_handle_pairs]
+        
+        # Fetch fresh user data from CF API
+        try:
+            cf_users = await cf.user.info(handles=handles)
+            # Update cache with fresh data
+            for user in cf_users:
+                cf_common.user_db.cache_cf_user(user)
+            # Create a mapping of handle to user
+            handle_to_user = {user.handle: user for user in cf_users}
+        except Exception as e:
+            # Fallback to cached data if API fails
+            self.logger.warning(f'Failed to fetch fresh data from CF API: {e}')
+            res = cf_common.user_db.get_cf_users_for_guild(ctx.guild.id)
+            handle_to_user = {cf_user.handle: cf_user for _, cf_user in res}
+        
         countries = [country.title() for country in countries]
-        res = cf_common.user_db.get_cf_users_for_guild(ctx.guild.id)
-        users = [
-            (ctx.guild.get_member(user_id), cf_user.handle, cf_user.rating)
-            for user_id, cf_user in res
-            if not countries or cf_user.country in countries
-        ]
-        users = [
-            (member, handle, rating)
-            for member, handle, rating in users
-            if member is not None
-        ]
+        users = []
+        for user_id, handle in user_id_handle_pairs:
+            member = ctx.guild.get_member(user_id)
+            if member is None:
+                continue
+            cf_user = handle_to_user.get(handle)
+            if cf_user is None:
+                continue
+            if countries and cf_user.country not in countries:
+                continue
+            users.append((member, cf_user.handle, cf_user.rating))
+        
         if not users:
             raise HandleCogError('No members with registered handles.')
 
@@ -828,7 +851,35 @@ class Handles(commands.Cog):
     async def pretty(self, ctx, page_no: int = None):
         """Show members of the server who have registered their handles
         and their Codeforces ratings, in color."""
-        user_id_cf_user_pairs = cf_common.user_db.get_cf_users_for_guild(ctx.guild.id)
+        # Fetch fresh data from Codeforces API
+        user_id_handle_pairs = cf_common.user_db.get_handles_for_guild(ctx.guild.id)
+        if not user_id_handle_pairs:
+            raise HandleCogError('No members with registered handles.')
+        
+        # Get all handles
+        handles = [handle for _, handle in user_id_handle_pairs]
+        
+        # Fetch fresh user data from CF API
+        try:
+            cf_users = await cf.user.info(handles=handles)
+            # Update cache with fresh data
+            for user in cf_users:
+                cf_common.user_db.cache_cf_user(user)
+            # Create a mapping of handle to user
+            handle_to_user = {user.handle: user for user in cf_users}
+        except Exception as e:
+            # Fallback to cached data if API fails
+            self.logger.warning(f'Failed to fetch fresh data from CF API: {e}')
+            res = cf_common.user_db.get_cf_users_for_guild(ctx.guild.id)
+            handle_to_user = {cf_user.handle: cf_user for _, cf_user in res}
+        
+        # Build user list with fresh data
+        user_id_cf_user_pairs = []
+        for user_id, handle in user_id_handle_pairs:
+            cf_user = handle_to_user.get(handle)
+            if cf_user:
+                user_id_cf_user_pairs.append((user_id, cf_user))
+        
         user_id_cf_user_pairs.sort(
             key=lambda p: p[1].rating if p[1].rating is not None else -1, reverse=True
         )
@@ -1573,12 +1624,20 @@ class Handles(commands.Cog):
         synced = 0
         failed = 0
         skipped = 0
+        roles_updated = 0
         
         for i, (user_id, handle) in enumerate(user_id_handle_pairs):
             if i % 10 == 0:
                 await status_msg.edit(content=f'Syncing... {i}/{len(user_id_handle_pairs)}')
             
             try:
+                # Fetch current user info first to update cache and roles
+                users = await cf.user.info(handles=[handle])
+                user = users[0]
+                
+                # Cache the current user data
+                cf_common.user_db.cache_cf_user(user)
+                
                 # Get rating history
                 rating_changes = await cf.user.rating(handle=handle)
                 
@@ -1601,17 +1660,46 @@ class Handles(commands.Cog):
                     )
                     synced += 1
                 else:
-                    # User has no rating history, try to get current data
-                    users = await cf.user.info(handles=[handle])
-                    user = users[0]
-                    if user.maxRating and user.rank != cf.UNRATED_RANK:
-                        cf_common.user_db.update_user_achievement(
-                            str(user_id), str(ctx.guild.id), handle,
-                            user.maxRating, user.rank.title
-                        )
-                        synced += 1
+                    # User has no rating history, use current data
+                    if user.maxRating and user.maxRating > 0:
+                        max_rating = user.maxRating
+                        rank = cf.rating2rank(max_rating)
+                        if rank != cf.UNRATED_RANK:
+                            cf_common.user_db.update_user_achievement(
+                                str(user_id), str(ctx.guild.id), handle,
+                                max_rating, rank.title
+                            )
+                            synced += 1
+                        else:
+                            skipped += 1
                     else:
                         skipped += 1
+                
+                # Update member's role based on maxRating
+                guild_member = ctx.guild.get_member(user_id)
+                if guild_member:
+                    max_rating = user.maxRating if user.maxRating else user.rating
+                    if max_rating is None:
+                        role_to_assign = None
+                    else:
+                        rank = cf.rating2rank(max_rating)
+                        if rank == cf.UNRATED_RANK:
+                            role_to_assign = None
+                        else:
+                            roles = [role for role in ctx.guild.roles if role.name == rank.title]
+                            if roles:
+                                role_to_assign = roles[0]
+                            else:
+                                role_to_assign = None
+                    
+                    if role_to_assign is not None or any(
+                        role.name in [r.title for r in cf.RATED_RANKS] 
+                        for role in guild_member.roles
+                    ):
+                        await self.update_member_rank_role(
+                            guild_member, role_to_assign, reason='Achievement sync'
+                        )
+                        roles_updated += 1
                 
                 # Small delay to avoid rate limiting
                 await asyncio.sleep(0.1)
@@ -1623,6 +1711,7 @@ class Handles(commands.Cog):
         summary = (
             f'Achievement sync complete!\n'
             f'✅ Synced: {synced}\n'
+            f'🎭 Roles updated: {roles_updated}\n'
             f'⏭️ Skipped (unrated): {skipped}\n'
             f'❌ Failed: {failed}'
         )
