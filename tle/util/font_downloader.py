@@ -27,8 +27,11 @@ def _unzip(font, archive):
 def _download(font_path):
     font = os.path.basename(font_path)
     logger.info(f'Downloading font `{font}`.')
-    with urllib.request.urlopen(f'{URL_BASE}{font}.zip') as resp:
-        _unzip(font, BytesIO(resp.read()))
+    try:
+        with urllib.request.urlopen(f'{URL_BASE}{font}.zip') as resp:
+            _unzip(font, BytesIO(resp.read()))
+    except Exception as e:
+        logger.warning(f'Failed to download font `{font}`: {e}')
 
 
 def maybe_download():

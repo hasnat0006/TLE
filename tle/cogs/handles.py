@@ -415,11 +415,6 @@ class Handles(commands.Cog):
             channel_id = cf_common.user_db.get_rankup_channel(guild.id)
             channel = guild.get_channel(channel_id)
             if channel is not None:
-                with contextlib.suppress(HandleCogError):
-                    embeds = self._make_rankup_embeds(guild, contest, change_by_handle)
-                    for embed in embeds:
-                        await channel.send(embed=embed)
-                
                 # Send achievement congratulations if any
                 if achievements:
                     with contextlib.suppress(HandleCogError):
@@ -543,6 +538,35 @@ class Handles(commands.Cog):
                 f'The handle `{handle}` is already associated with another user.'
             )
         cf_common.user_db.cache_cf_user(user)
+        
+        # Sync achievements: initialize with current max rating and highest rank
+        # Get the user's rating history to find their actual max rating
+        try:
+            rating_changes = await cf.user.rating(handle=handle)
+            if rating_changes:
+                # Find max rating from history
+                max_rating_from_history = max(change.newRating for change in rating_changes)
+                # Get all ranks achieved
+                ranks_achieved = [cf.rating2rank(change.newRating) for change in rating_changes]
+                rank_order = list(cf.RATED_RANKS)
+                # Find the highest rank (latest in rank_order list)
+                highest_rank = max(ranks_achieved, key=lambda r: rank_order.index(r) if r in rank_order else -1)
+                highest_rank_title = highest_rank.title
+            else:
+                # No rating history, use current values
+                max_rating_from_history = user.maxRating if user.maxRating else (user.rating if user.rating else 0)
+                highest_rank_title = user.rank.title if user.rank != cf.UNRATED_RANK else None
+        except (cf.NotFoundError, cf.CodeforcesApiError):
+            # Fallback to current user data if API fails
+            max_rating_from_history = user.maxRating if user.maxRating else (user.rating if user.rating else 0)
+            highest_rank_title = user.rank.title if user.rank != cf.UNRATED_RANK else None
+        
+        # Initialize or update achievements record
+        if max_rating_from_history and highest_rank_title:
+            cf_common.user_db.update_user_achievement(
+                str(member.id), str(ctx.guild.id), handle,
+                max_rating_from_history, highest_rank_title
+            )
 
         if user.rank == cf.UNRATED_RANK:
             role_to_assign = None
@@ -1103,15 +1127,17 @@ class Handles(commands.Cog):
                     current_max, current_highest_rank
                 )
                 
-                achievements_by_member.append((member, {
-                    'handle': handle,
-                    'new_rating': new_rating,
-                    'old_max': old_max,
-                    'new_rank': new_rank,
-                    'old_rank': old_rank,
-                    'is_new_max': is_new_max,
-                    'is_new_rank': is_new_rank,
-                }))
+                # Only announce achievements for Pupil rank and above (rating >= 1200)
+                if new_rating >= 1200:
+                    achievements_by_member.append((member, {
+                        'handle': handle,
+                        'new_rating': new_rating,
+                        'old_max': old_max,
+                        'new_rank': new_rank,
+                        'old_rank': old_rank,
+                        'is_new_max': is_new_max,
+                        'is_new_rank': is_new_rank,
+                    }))
         
         return achievements_by_member
 
@@ -1497,6 +1523,92 @@ class Handles(commands.Cog):
             summary_message += f'- Skipped (Has Purgatory): {skipped_purgatory}\n'
 
         await status_message.edit(content=summary_message)
+
+    @commands.command(brief='Sync achievements for all users')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def sync_achievements(self, ctx, member: discord.Member = None):
+        """Sync contest rank and rating achievements for users.
+        
+        This command will fetch rating history from Codeforces and update 
+        the achievement records (max rating and highest rank) for users.
+        
+        Usage:
+        - ;sync_achievements - Sync all users in the server
+        - ;sync_achievements @user - Sync a specific user
+        """
+        status_msg = await ctx.send('Starting achievement sync...')
+        
+        if member:
+            # Sync single user
+            user_id_handle_pairs = [(member.id, cf_common.user_db.get_handle(member.id, ctx.guild.id))]
+            if not user_id_handle_pairs[0][1]:
+                await status_msg.edit(content=f'{member.mention} has no handle registered.')
+                return
+        else:
+            # Sync all users in guild
+            user_id_handle_pairs = cf_common.user_db.get_handles_for_guild(ctx.guild.id)
+        
+        if not user_id_handle_pairs:
+            await status_msg.edit(content='No users with handles found.')
+            return
+        
+        synced = 0
+        failed = 0
+        skipped = 0
+        
+        for i, (user_id, handle) in enumerate(user_id_handle_pairs):
+            if i % 10 == 0:
+                await status_msg.edit(content=f'Syncing... {i}/{len(user_id_handle_pairs)}')
+            
+            try:
+                # Get rating history
+                rating_changes = await cf.user.rating(handle=handle)
+                
+                if rating_changes:
+                    # Find max rating from history
+                    max_rating = max(change.newRating for change in rating_changes)
+                    # Get all ranks achieved
+                    ranks_achieved = [cf.rating2rank(change.newRating) for change in rating_changes]
+                    rank_order = list(cf.RATED_RANKS)
+                    # Find the highest rank
+                    highest_rank = max(
+                        ranks_achieved, 
+                        key=lambda r: rank_order.index(r) if r in rank_order else -1
+                    )
+                    
+                    # Update achievements
+                    cf_common.user_db.update_user_achievement(
+                        str(user_id), str(ctx.guild.id), handle,
+                        max_rating, highest_rank.title
+                    )
+                    synced += 1
+                else:
+                    # User has no rating history, try to get current data
+                    users = await cf.user.info(handles=[handle])
+                    user = users[0]
+                    if user.maxRating and user.rank != cf.UNRATED_RANK:
+                        cf_common.user_db.update_user_achievement(
+                            str(user_id), str(ctx.guild.id), handle,
+                            user.maxRating, user.rank.title
+                        )
+                        synced += 1
+                    else:
+                        skipped += 1
+                
+                # Small delay to avoid rate limiting
+                await asyncio.sleep(0.1)
+                
+            except (cf.NotFoundError, cf.CodeforcesApiError) as e:
+                self.logger.warning(f'Failed to sync achievements for {handle}: {e}')
+                failed += 1
+        
+        summary = (
+            f'Achievement sync complete!\n'
+            f'✅ Synced: {synced}\n'
+            f'⏭️ Skipped (unrated): {skipped}\n'
+            f'❌ Failed: {failed}'
+        )
+        await status_msg.edit(content=summary)
 
     @commands.command(brief='Check achievement status for a user')
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)

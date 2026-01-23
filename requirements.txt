@@ -1,6 +1,6 @@
 # Discord bot core
-discord.py==1.7.3
-aiohttp<3.8
+discord.py[voice]>=2.0.0
+aiohttp
 aiocache
 
 # Data processing and analysis
