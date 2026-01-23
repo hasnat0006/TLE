@@ -568,15 +568,21 @@ class Handles(commands.Cog):
                 max_rating_from_history, highest_rank_title
             )
 
-        if user.rank == cf.UNRATED_RANK:
+        # Assign role based on maxRating, not current rating
+        max_rating = user.maxRating if user.maxRating else user.rating
+        if max_rating is None:
             role_to_assign = None
         else:
-            roles = [role for role in ctx.guild.roles if role.name == user.rank.title]
-            if not roles:
-                raise HandleCogError(
-                    f'Role for rank `{user.rank.title}` not present in the server'
-                )
-            role_to_assign = roles[0]
+            rank_based_on_max = cf.rating2rank(max_rating)
+            if rank_based_on_max == cf.UNRATED_RANK:
+                role_to_assign = None
+            else:
+                roles = [role for role in ctx.guild.roles if role.name == rank_based_on_max.title]
+                if not roles:
+                    raise HandleCogError(
+                        f'Role for rank `{rank_based_on_max.title}` not present in the server'
+                    )
+                role_to_assign = roles[0]
         await self.update_member_rank_role(
             member, role_to_assign, reason='New handle set for user'
         )
@@ -888,9 +894,15 @@ class Handles(commands.Cog):
         for user in users:
             cf_common.user_db.cache_cf_user(user)
 
-        required_roles = {
-            user.rank.title for user in users if user.rank != cf.UNRATED_RANK
-        }
+        # Build required roles based on maxRating, not current rating
+        required_roles = set()
+        for user in users:
+            max_rating = user.maxRating if user.maxRating else user.rating
+            if max_rating is not None:
+                rank = cf.rating2rank(max_rating)
+                if rank != cf.UNRATED_RANK:
+                    required_roles.add(rank.title)
+        
         rank2role = {
             role.name: role for role in guild.roles if role.name in required_roles
         }
@@ -903,9 +915,15 @@ class Handles(commands.Cog):
             )
 
         for member, user in zip(members, users, strict=False):
-            role_to_assign = (
-                None if user.rank == cf.UNRATED_RANK else rank2role[user.rank.title]
-            )
+            # Assign role based on maxRating, not current rating
+            max_rating = user.maxRating if user.maxRating else user.rating
+            if max_rating is None:
+                role_to_assign = None
+            else:
+                rank = cf.rating2rank(max_rating)
+                role_to_assign = (
+                    None if rank == cf.UNRATED_RANK else rank2role[rank.title]
+                )
             await self.update_member_rank_role(
                 member, role_to_assign, reason='Codeforces rank update'
             )
